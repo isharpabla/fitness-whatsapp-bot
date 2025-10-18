@@ -4,12 +4,19 @@ from openai import OpenAI
 import os, sys, traceback, redis
 
 app = Flask(__name__)
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
-r = redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"))
 
-FREE_LIMIT = 10
-PAYMENT_LINK = "https://rzp.io/i/your-link"
-PAYWALL_TEXT = f"You’ve reached your free limit. Unlock unlimited chat for 30 days: {PAYMENT_LINK}"
+# --- config via env ---
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+FREE_LIMIT = int(os.environ.get("FREE_LIMIT", "10"))           # e.g., 10
+PAYMENT_LINK = os.environ.get("PAYMENT_LINK", "https://rzp.io/i/your-link")
+PAYWALL_TEXT = (
+    "You’ve reached your free limit. Unlock unlimited chat for 30 days: " + PAYMENT_LINK
+)
+
+# --- clients ---
+client = OpenAI(api_key=OPENAI_API_KEY)
+r = redis.from_url(REDIS_URL, decode_responses=True)
 
 SYSTEM_PROMPT = """
 You are a comprehensive fitness and nutrition coach for everyday Indians training at home or in the gym.
@@ -28,26 +35,55 @@ Maintain a professional, factual, motivating tone — precise and encouraging bu
 Always prioritize user safety, sustainability, and realistic long-term progress.
 """
 
+# -------- Redis-safe helpers --------
+def is_paid(num: str) -> bool:
+    try:
+        return bool(r.sismember("paid_users", num))
+    except Exception:
+        return False
+
+def get_count(num: str) -> int:
+    try:
+        val = r.get(f"count:{num}")
+        return int(val or 0)
+    except Exception:
+        return 0
+
+def add_count(num: str) -> None:
+    try:
+        key = f"count:{num}"
+        pipe = r.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, 86400)  # 24h rolling window
+        pipe.execute()
+    except Exception:
+        pass
+
+# -------------- routes --------------
 @app.get("/")
 def health():
     return "Fitness AI WhatsApp Bot is running."
 
+# Optional: quick Twilio connectivity check
+@app.post("/echo")
+def echo():
+    resp = MessagingResponse()
+    resp.message("pong")
+    return str(resp)
+
 @app.post("/whatsapp")
 def whatsapp_webhook():
     user_msg = (request.form.get("Body", "") or "").strip()
-    user_num = request.form.get("From", "")
+    user_num = request.form.get("From", "")  # format: whatsapp:+91XXXXXXXXXX
     if not user_msg:
         return str(_reply("Send a fitness question to begin."))
 
-    key = f"count:{user_num}"
-    cnt = int(r.get(key) or 0)
-    paid = r.sismember("paid_users", user_num)
-
+    # paywall gate with resilient Redis
+    cnt = get_count(user_num)
+    paid = is_paid(user_num)
     if not paid and cnt >= FREE_LIMIT:
         return str(_reply(PAYWALL_TEXT))
-
-    r.incr(key)
-    r.expire(key, 86400)
+    add_count(user_num)
 
     try:
         resp = client.chat.completions.create(
@@ -62,24 +98,36 @@ def whatsapp_webhook():
         text = resp.choices[0].message.content.strip()
         return str(_reply(text))
     except Exception as e:
-        print("Error:", e, file=sys.stderr, flush=True)
+        print("OpenAI error:", e, file=sys.stderr, flush=True)
         print(traceback.format_exc(), file=sys.stderr, flush=True)
-        return str(_reply("Server issue. Try again later."))
+        return str(_reply("Temporary issue. Try again shortly."))
 
+# Razorpay webhook (simple; add signature verification for prod)
 @app.post("/razorpay_webhook")
 def razorpay_webhook():
     data = request.json or {}
-    if data.get("event") == "payment.captured":
-        phone = (data.get("payload", {}).get("payment", {})
-                 .get("entity", {}).get("notes", {}).get("phone"))
-        if phone:
-            r.sadd("paid_users", phone)
+    try:
+        if data.get("event") == "payment.captured":
+            phone = (
+                data.get("payload", {})
+                    .get("payment", {})
+                    .get("entity", {})
+                    .get("notes", {})
+                    .get("phone")
+            )
+            if phone:
+                try:
+                    r.sadd("paid_users", phone)
+                except Exception:
+                    pass
+    except Exception as e:
+        print("Webhook error:", e, file=sys.stderr, flush=True)
     return "", 200
 
-def _reply(text):
-    rmsg = MessagingResponse()
-    rmsg.message(text)
-    return rmsg
+def _reply(text: str):
+    msg = MessagingResponse()
+    msg.message(text)
+    return msg
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
