@@ -25,7 +25,12 @@ SUGGESTIONS = [
 
 # --- clients ---
 client = OpenAI(api_key=OPENAI_API_KEY)
-r = redis.from_url(REDIS_URL, decode_responses=True)
+r = redis.from_url(
+    os.environ["REDIS_URL"],
+    decode_responses=True,
+    ssl=True,
+    ssl_cert_reqs=None,
+)
 
 SYSTEM_PROMPT = """
 You are a comprehensive fitness and nutrition coach for everyday Indians training at home or in the gym. 
