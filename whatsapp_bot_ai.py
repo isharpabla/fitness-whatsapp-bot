@@ -7,31 +7,26 @@ import os, sys, traceback, redis, json
 
 app = Flask(__name__)
 
-# --- env config ---
+# --- environment config ---
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 REDIS_URL      = os.environ.get("REDIS_URL", "redis://localhost:6379")
 FREE_LIMIT     = int(os.environ.get("FREE_LIMIT", "10"))
 PAYMENT_LINK   = os.environ.get("PAYMENT_LINK", "https://rzp.io/i/your-link")
-MAX_HISTORY    = int(os.environ.get("MAX_HISTORY", "8"))  # pairs to retain
+MAX_HISTORY    = int(os.environ.get("MAX_HISTORY", "8"))
+MAX_ANSWER_LINES = int(os.environ.get("MAX_ANSWER_LINES", "6"))   # main answer lines
+MAX_TOTAL_LINES  = int(os.environ.get("MAX_TOTAL_LINES", "10"))   # final cap
 
 PAYWALL_TEXT = "You’ve reached your free limit. Unlock unlimited chat for 30 days: " + PAYMENT_LINK
-SUGGESTIONS = [
-    "Correct my squat or deadlift cues",
-    "Give me a 4-day upper/lower plan",
-    "High-protein Indian veg meal ideas",
-    "How to take creatine safely?",
-    "Quick hotel-room or home workout",
-]
 
 # --- clients ---
 client = OpenAI(api_key=OPENAI_API_KEY)
 r = redis.from_url(
     os.environ["REDIS_URL"],
-    decode_responses=True,  # no ssl args
+    decode_responses=True,
 )
 
 SYSTEM_PROMPT = """
-You are a comprehensive fitness and nutrition coach for everyday Indians training at home or in the gym. 
+You are a comprehensive fitness and nutrition coach for everyday Indians training at home or in the gym.
 Speak like an experienced, calm gym trainer: clear, practical, encouraging, never emotional or dramatic.
 
 Provide detailed, actionable guidance on:
@@ -42,13 +37,20 @@ Provide detailed, actionable guidance on:
 • Medical or health context: when discussing pain, fatigue, or conditions, only describe what reputable public sources (WHO, ICMR, NIH, Mayo Clinic) say. Never diagnose or give personalized medical advice.
 • Behavior and discipline: consistency, rest, hygiene, and gym etiquette.
 
-Personal questions are allowed, but respond with general, non-personalized education and options. Do not request private health data. If personalization is necessary, state what factors usually matter and suggest seeing a professional.
+Personal questions are allowed, but respond with general, non-personalized education and options.
+Do not request private health data. If personalization is necessary, state what factors usually matter and suggest seeing a professional.
 
-Keep replies concise and structured. Prefer bullets. End every reply with 3 short follow-up prompts the user can ask next.
+Keep replies under 7–10 lines. Use bullet points when possible.
 Always prioritize safety, sustainability, and realistic long-term progress.
 """
 
-# ---------- Redis-safe helpers ----------
+# ---------- helpers ----------
+def _cap_lines(txt: str, n: int) -> str:
+    lines = [l.rstrip() for l in txt.strip().splitlines() if l.strip()]
+    if len(lines) <= n:
+        return "\n".join(lines)
+    return "\n".join(lines[:n] + ["…"])
+
 def is_paid(num: str) -> bool:
     try: return bool(r.sismember("paid_users", num))
     except: return False
@@ -67,7 +69,7 @@ def _hist_key(num): return f"hist:{num}"
 
 def get_history(num):
     try:
-        raw = r.lrange(_hist_key(num), 0, MAX_HISTORY*2-1)  # newest first
+        raw = r.lrange(_hist_key(num), 0, MAX_HISTORY*2-1)
         return [json.loads(x) for x in reversed(raw)]
     except: return []
 
@@ -82,8 +84,8 @@ def add_history(num, role, content):
     except: pass
 
 def with_suggestions(answer: str) -> str:
-    tips = "Next you can ask:\n- " + "\n- ".join(SUGGESTIONS[:3])
-    return f"{answer}\n\n{tips}\n(Type 'reset' to clear context.)"
+    # no suggestions, just limit lines
+    return _cap_lines(answer, MAX_TOTAL_LINES)
 
 def _reply(text: str):
     msg = MessagingResponse()
@@ -95,11 +97,6 @@ def _reply(text: str):
 def health():
     return "Fitness AI WhatsApp Bot is running."
 
-# optional echo for Twilio testing
-@app.post("/echo")
-def echo():
-    rmsg = MessagingResponse(); rmsg.message("pong"); return str(rmsg)
-
 @app.get("/redis-test")
 def redis_test():
     """Quick connectivity check for Redis"""
@@ -110,27 +107,28 @@ def redis_test():
     except Exception as e:
         return f"redis error: {e}", 500
 
+@app.post("/echo")
+def echo():
+    rmsg = MessagingResponse(); rmsg.message("pong"); return str(rmsg)
+
 @app.post("/whatsapp")
 def whatsapp_webhook():
     user_msg = (request.form.get("Body", "") or "").strip()
-    user_num = request.form.get("From", "")  # e.g., whatsapp:+91XXXXXXXXXX
+    user_num = request.form.get("From", "")
     if not user_msg:
         return str(_reply("Send a fitness question to begin."))
 
-    # commands
     if user_msg.lower() == "reset":
         try: r.delete(_hist_key(user_num))
         except: pass
         return str(_reply("Context cleared. Ask your next question."))
 
-    # paywall gate
     cnt = get_count(user_num)
     paid = is_paid(user_num)
     if not paid and cnt >= FREE_LIMIT:
         return str(_reply(PAYWALL_TEXT))
     add_count(user_num)
 
-    # assemble messages with memory
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
     for m in get_history(user_num):
         if m.get("role") in ("user","assistant"):
@@ -142,15 +140,13 @@ def whatsapp_webhook():
             model="gpt-4o-mini",
             messages=msgs,
             temperature=0.4,
-            max_tokens=700,
+            max_tokens=600,
         )
         text = (resp.choices[0].message.content or "").strip()
-
-        # persist turn
         add_history(user_num, "user", user_msg)
         add_history(user_num, "assistant", text)
 
-        # WhatsApp message limit (~1600 chars). Split if needed.
+        # shorten and split for WhatsApp length
         final_text = with_suggestions(text)
         chunks = [final_text[i:i+1500] for i in range(0, len(final_text), 1500)]
         rmsg = MessagingResponse()
@@ -163,7 +159,6 @@ def whatsapp_webhook():
         print(traceback.format_exc(), file=sys.stderr, flush=True)
         return str(_reply("Temporary issue. Try again shortly."))
 
-# Razorpay webhook (simple; add signature verification for production)
 @app.post("/razorpay_webhook")
 def razorpay_webhook():
     data = request.json or {}
