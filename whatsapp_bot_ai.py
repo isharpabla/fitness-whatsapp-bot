@@ -40,8 +40,11 @@ Provide detailed, actionable guidance on:
 Personal questions are allowed, but respond with general, non-personalized education and options.
 Do not request private health data. If personalization is necessary, state what factors usually matter and suggest seeing a professional.
 
-Keep replies under 7–10 lines. Use bullet points when possible.
-Always prioritize safety, sustainability, and realistic long-term progress.
+Keep each reply complete but concise — no partial sentences. 
+Limit the main answer to about 6–7 short lines or bullet points. 
+Focus only on the most practical and essential advice. 
+Do not exceed 100 words in total. 
+Always ensure the response feels finished, not cut off mid-thought.
 """
 
 # ---------- helpers ----------
