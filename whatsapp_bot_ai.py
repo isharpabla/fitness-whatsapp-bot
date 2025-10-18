@@ -102,6 +102,16 @@ def health():
 def echo():
     rmsg = MessagingResponse(); rmsg.message("pong"); return str(rmsg)
 
+@app.get("/redis-test")
+def redis_test():
+    """Quick connectivity check for Redis"""
+    try:
+        r.set("probe", "ok", ex=60)
+        v = r.get("probe")
+        return f"redis set/get: {v}"
+    except Exception as e:
+        return f"redis error: {e}", 500
+
 @app.post("/whatsapp")
 def whatsapp_webhook():
     user_msg = (request.form.get("Body", "") or "").strip()
@@ -134,7 +144,7 @@ def whatsapp_webhook():
             model="gpt-4o-mini",
             messages=msgs,
             temperature=0.4,
-            max_tokens=700,   # allow fuller answers
+            max_tokens=700,
         )
         text = (resp.choices[0].message.content or "").strip()
 
@@ -142,7 +152,7 @@ def whatsapp_webhook():
         add_history(user_num, "user", user_msg)
         add_history(user_num, "assistant", text)
 
-        # WhatsApp body limit handling (~1600 chars). Split large replies.
+        # WhatsApp message limit (~1600 chars). Split if needed.
         final_text = with_suggestions(text)
         chunks = [final_text[i:i+1500] for i in range(0, len(final_text), 1500)]
         rmsg = MessagingResponse()
