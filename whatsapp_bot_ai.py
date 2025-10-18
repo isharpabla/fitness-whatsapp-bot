@@ -129,7 +129,7 @@ def whatsapp_webhook():
             model="gpt-4o-mini",
             messages=msgs,
             temperature=0.4,
-            max_tokens=700,
+            max_tokens=700,   # allow fuller answers
         )
         text = (resp.choices[0].message.content or "").strip()
 
@@ -137,7 +137,14 @@ def whatsapp_webhook():
         add_history(user_num, "user", user_msg)
         add_history(user_num, "assistant", text)
 
-        return str(_reply(with_suggestions(text)))
+        # WhatsApp body limit handling (~1600 chars). Split large replies.
+        final_text = with_suggestions(text)
+        chunks = [final_text[i:i+1500] for i in range(0, len(final_text), 1500)]
+        rmsg = MessagingResponse()
+        for c in chunks:
+            rmsg.message(c)
+        return str(rmsg)
+
     except Exception as e:
         print("OpenAI error:", e, file=sys.stderr, flush=True)
         print(traceback.format_exc(), file=sys.stderr, flush=True)
