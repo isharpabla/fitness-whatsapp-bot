@@ -27,9 +27,7 @@ SUGGESTIONS = [
 client = OpenAI(api_key=OPENAI_API_KEY)
 r = redis.from_url(
     os.environ["REDIS_URL"],
-    decode_responses=True,
-    ssl=True,
-    ssl_cert_reqs=None,
+    decode_responses=True,  # no ssl args
 )
 
 SYSTEM_PROMPT = """
